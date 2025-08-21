@@ -2,9 +2,15 @@ altgraph==0.17.4
 chardet==5.2.0
 et_xmlfile==2.0.0
 macholib==1.16.3
+numpy==2.3.2
 openpyxl==3.1.5
 packaging==25.0
+pandas==2.3.1
 pyinstaller==6.15.0
 pyinstaller-hooks-contrib==2025.8
+python-dateutil==2.9.0.post0
+pytz==2025.2
 setuptools==80.9.0
+six==1.17.0
+tzdata==2025.2
 xlrd==2.0.2
