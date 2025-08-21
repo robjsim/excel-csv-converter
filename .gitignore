@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+converter_env/
+
+# PyInstaller
+*.spec
+build/
+dist/
+*.manifest
+*.app
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
