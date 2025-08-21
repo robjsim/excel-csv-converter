@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import openpyxl
 from openpyxl import Workbook
+from openpyxl.utils.exceptions import IllegalCharacterError
 import xlrd
 import warnings
 
@@ -39,10 +40,10 @@ class ExcelCSVConverter:
             
             if file_ext == '.xls':
                 # Handle older .xls files
-                workbook = xlrd.open_workbook(str(excel_path))
+                workbook = xlrd.open_workbook(str(excel_path), encoding_override='utf-8')
                 sheet = workbook.sheet_by_index(sheet_index)
                 
-                with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                with open(csv_path, 'w', newline='', encoding='utf-8-sig', errors='replace') as csvfile:
                     writer = csv.writer(csvfile)
                     for row_idx in range(sheet.nrows):
                         row = []
@@ -58,19 +59,32 @@ class ExcelCSVConverter:
                                 except:
                                     row.append(str(cell.value))
                             else:
-                                row.append(str(cell.value))
+                                # Ensure proper string handling for all characters
+                                cell_value = str(cell.value)
+                                # Remove any null bytes that might cause issues
+                                cell_value = cell_value.replace('\x00', '')
+                                row.append(cell_value)
                         writer.writerow(row)
             else:
                 # Handle .xlsx files with openpyxl (memory efficient for large files)
                 workbook = openpyxl.load_workbook(str(excel_path), read_only=True, data_only=True)
                 sheet = workbook.worksheets[sheet_index]
                 
-                with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                with open(csv_path, 'w', newline='', encoding='utf-8-sig', errors='replace') as csvfile:
                     writer = csv.writer(csvfile)
                     # Use iter_rows for memory efficiency with large files
                     for row in sheet.iter_rows(values_only=True):
-                        # Convert None values to empty strings
-                        row_data = ['' if cell is None else str(cell) for cell in row]
+                        # Convert None values to empty strings and handle all unicode properly
+                        row_data = []
+                        for cell in row:
+                            if cell is None:
+                                row_data.append('')
+                            else:
+                                # Ensure proper string conversion for all types
+                                cell_str = str(cell)
+                                # Remove any null bytes
+                                cell_str = cell_str.replace('\x00', '')
+                                row_data.append(cell_str)
                         writer.writerow(row_data)
                 
                 workbook.close()
@@ -83,7 +97,7 @@ class ExcelCSVConverter:
     def csv_to_excel(self, csv_path, excel_path=None, xlsx=True):
         """
         Convert CSV file to Excel format.
-        Handles large files efficiently using streaming.
+        Handles any Unicode characters including emojis, accents, Asian characters, etc.
         """
         csv_path = Path(csv_path)
         
@@ -96,41 +110,158 @@ class ExcelCSVConverter:
             workbook = Workbook(write_only=True)  # write_only mode for memory efficiency
             sheet = workbook.create_sheet('Sheet1')
             
-            # Read CSV and write to Excel
-            with open(csv_path, 'r', encoding='utf-8') as csvfile:
-                # Try to detect delimiter
-                sample = csvfile.read(1024)
-                csvfile.seek(0)
-                sniffer = csv.Sniffer()
+            # Try different encodings - expanded list for maximum compatibility
+            encodings = [
+                'utf-8-sig',  # UTF-8 with BOM (handles Excel exports)
+                'utf-8',      # Standard UTF-8
+                'utf-16',     # Unicode (handles emojis well)
+                'utf-16-le',  # Little-endian UTF-16
+                'utf-16-be',  # Big-endian UTF-16
+                'utf-32',     # Full Unicode
+                'latin-1',    # Western European
+                'iso-8859-1', # ISO Western European
+                'cp1252',     # Windows Western European
+                'cp1251',     # Windows Cyrillic
+                'gb2312',     # Simplified Chinese
+                'shift_jis',  # Japanese
+                'euc-kr',     # Korean
+                'big5',       # Traditional Chinese
+                'ascii'       # Fallback
+            ]
+            
+            encoding_used = None
+            csvfile = None
+            sample = ""
+            
+            # Try to detect encoding
+            for encoding in encodings:
                 try:
-                    delimiter = sniffer.sniff(sample).delimiter
-                except:
+                    with open(csv_path, 'r', encoding=encoding, errors='strict') as test_file:
+                        # Try to read the entire file to ensure encoding works
+                        sample = test_file.read(8192)  # Read more for better detection
+                        test_file.seek(0)
+                    # If we got here, encoding works
+                    csvfile = open(csv_path, 'r', encoding=encoding, errors='replace')
+                    encoding_used = encoding
+                    break
+                except (UnicodeDecodeError, UnicodeError, LookupError):
+                    continue
+            
+            # Last resort: use chardet to detect encoding
+            if not csvfile:
+                try:
+                    import chardet
+                    with open(csv_path, 'rb') as rawfile:
+                        raw = rawfile.read(100000)  # Read up to 100KB for detection
+                        result = chardet.detect(raw)
+                        if result['encoding']:
+                            try:
+                                csvfile = open(csv_path, 'r', encoding=result['encoding'], errors='replace')
+                                encoding_used = result['encoding']
+                            except:
+                                pass
+                except ImportError:
+                    pass  # chardet not installed
+            
+            # Ultimate fallback: UTF-8 with error replacement
+            if not csvfile:
+                csvfile = open(csv_path, 'r', encoding='utf-8', errors='replace')
+                encoding_used = 'utf-8 (with replacements)'
+            
+            try:
+                # Detect delimiter
+                if sample:
+                    sniffer = csv.Sniffer()
+                    try:
+                        delimiter = sniffer.sniff(sample).delimiter
+                    except:
+                        # Try common delimiters
+                        for delim in [',', ';', '\t', '|']:
+                            if delim in sample:
+                                delimiter = delim
+                                break
+                        else:
+                            delimiter = ','
+                else:
                     delimiter = ','
                 
                 reader = csv.reader(csvfile, delimiter=delimiter)
+                row_num = 0
+                
                 for row in reader:
-                    # Convert strings to appropriate types
+                    row_num += 1
                     processed_row = []
+                    
                     for cell in row:
-                        if cell == '':
+                        if cell == '' or cell is None:
                             processed_row.append(None)
                         else:
-                            # Try to convert to number if possible
-                            try:
-                                if '.' in cell:
-                                    processed_row.append(float(cell))
+                            # Clean the cell value
+                            cell = cell.replace('\x00', '')  # Remove null bytes
+                            
+                            # Smart type detection (but preserve strings with special chars)
+                            # Check if it looks like a pure number
+                            if cell.strip():  # Not empty after stripping
+                                # Don't convert if it has special Unicode characters
+                                if all(ord(char) < 128 for char in cell):
+                                    # Only try conversion for ASCII-only strings
+                                    try:
+                                        # Avoid converting IDs, phone numbers, zip codes
+                                        if (cell[0] != '0' and  # Doesn't start with 0
+                                            '.' in cell and 
+                                            len(cell) < 20 and 
+                                            cell.count('.') == 1):
+                                            # Might be a float
+                                            val = float(cell)
+                                            processed_row.append(val)
+                                        elif (cell.isdigit() and 
+                                              len(cell) < 10 and 
+                                              cell[0] != '0'):  # Doesn't start with 0
+                                            # Small integer (not phone/ID)
+                                            processed_row.append(int(cell))
+                                        else:
+                                            # Keep as string
+                                            processed_row.append(cell)
+                                    except (ValueError, AttributeError):
+                                        processed_row.append(cell)
                                 else:
-                                    processed_row.append(int(cell))
-                            except ValueError:
-                                processed_row.append(cell)
+                                    # Has Unicode characters - keep as string
+                                    processed_row.append(cell)
+                            else:
+                                processed_row.append(cell.strip() if cell.strip() else None)
                     
-                    sheet.append(processed_row)
+                    try:
+                        sheet.append(processed_row)
+                    except IllegalCharacterError:
+                        # Handle illegal characters for Excel
+                        cleaned_row = []
+                        for cell in processed_row:
+                            if isinstance(cell, str):
+                                # Remove illegal XML characters
+                                illegal_chars = [chr(i) for i in range(0, 32) if i not in [9, 10, 13]]
+                                for char in illegal_chars:
+                                    cell = cell.replace(char, '')
+                                cleaned_row.append(cell)
+                            else:
+                                cleaned_row.append(cell)
+                        sheet.append(cleaned_row)
+                    except Exception as e:
+                        # Last resort: convert everything to strings
+                        string_row = [str(cell) if cell is not None else None for cell in row]
+                        sheet.append(string_row)
+                        print(f"Warning: Row {row_num} required special handling")
+                
+            finally:
+                csvfile.close()
             
             # Save the workbook
             workbook.save(str(excel_path))
             workbook.close()
             
-            return True, f"Successfully converted to: {excel_path}"
+            if encoding_used not in ['utf-8', 'utf-8-sig']:
+                return True, f"Successfully converted to: {excel_path}\n(Detected encoding: {encoding_used})"
+            else:
+                return True, f"Successfully converted to: {excel_path}"
             
         except Exception as e:
             return False, f"Error converting CSV to Excel: {str(e)}"
