@@ -66,6 +66,8 @@ jobs:
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')  # Only run on tags
+    permissions:
+      contents: write  # Explicitly grant write permission for releases
     
     steps:
     - uses: actions/checkout@v4
@@ -84,16 +86,19 @@ jobs:
     
     - name: Rename files for release
       run: |
-        mv ./artifacts/windows/*.exe ./ExcelCSVConverter-Windows.exe
-        mv ./artifacts/macos/*.zip ./ExcelCSVConverter-macOS.zip
+        mv ./artifacts/windows/*.exe ./ExcelCSVConverter-Windows.exe || echo "Windows file not found"
+        mv ./artifacts/macos/*.zip ./ExcelCSVConverter-macOS.zip || echo "macOS file not found"
+        ls -la
     
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           ExcelCSVConverter-Windows.exe
           ExcelCSVConverter-macOS.zip
         generate_release_notes: true
+        draft: false
+        prerelease: false
         body: |
           ## Excel CSV Converter
           
