@@ -162,7 +162,14 @@ class ExcelCSVConverter:
             
             # Configure CSV reader for complex data
             # Set a larger field size limit for JSON data
-            csv.field_size_limit(sys.maxsize)
+            import sys
+            maxInt = sys.maxsize
+            while True:
+                try:
+                    csv.field_size_limit(maxInt)
+                    break
+                except OverflowError:
+                    maxInt = int(maxInt/10)  # Reduce by factor of 10 until it works
             
             # Use excel dialect which handles quotes better
             reader = csv.reader(csvfile, dialect='excel', 
