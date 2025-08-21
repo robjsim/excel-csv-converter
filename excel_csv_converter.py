@@ -97,7 +97,8 @@ class ExcelCSVConverter:
     def csv_to_excel(self, csv_path, excel_path=None, xlsx=True):
         """
         Convert CSV file to Excel format.
-        Handles any Unicode characters including emojis, accents, Asian characters, etc.
+        Handles complex CSVs with JSON data, Unicode characters, and special formatting.
+        Uses pandas as primary method for better handling of complex data.
         """
         csv_path = Path(csv_path)
         
@@ -105,166 +106,155 @@ class ExcelCSVConverter:
             extension = '.xlsx' if xlsx else '.xls'
             excel_path = csv_path.with_suffix(extension)
         
+        # Try pandas first if available (usually more robust)
+        try:
+            import pandas as pd
+            print("Using pandas for conversion (recommended for complex files)...")
+            
+            # Read CSV with pandas - very robust for complex data
+            df = pd.read_csv(
+                csv_path, 
+                encoding='utf-8',
+                encoding_errors='replace',
+                on_bad_lines='warn',  # Warn but don't fail on bad lines
+                engine='python',  # Python engine handles complex quotes better
+                sep=None,  # Auto-detect separator
+                dtype=str,  # Keep everything as strings to avoid conversion issues
+                keep_default_na=False,  # Don't convert strings to NaN
+                na_values=[''],  # Only treat empty strings as NaN
+                quoting=csv.QUOTE_MINIMAL
+            )
+            
+            # Handle large cells that exceed Excel's limit
+            for col in df.columns:
+                df[col] = df[col].apply(lambda x: x[:32767] if isinstance(x, str) and len(x) > 32767 else x)
+            
+            # Write to Excel
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='Sheet1', index=False)
+            
+            row_count = len(df)
+            print(f"Successfully converted {row_count} rows using pandas")
+            return True, f"Successfully converted to: {excel_path}\n(Processed {row_count} rows using optimized method)"
+            
+        except ImportError:
+            print("Pandas not available, using standard method...")
+        except Exception as pandas_error:
+            print(f"Pandas conversion failed: {pandas_error}, trying standard method...")
+        
+        # Fallback to original method if pandas fails or isn't available
         try:
             # Create a new workbook
             workbook = Workbook(write_only=True)  # write_only mode for memory efficiency
             sheet = workbook.create_sheet('Sheet1')
             
-            # Try different encodings - expanded list for maximum compatibility
-            encodings = [
-                'utf-8-sig',  # UTF-8 with BOM (handles Excel exports)
-                'utf-8',      # Standard UTF-8
-                'utf-16',     # Unicode (handles emojis well)
-                'utf-16-le',  # Little-endian UTF-16
-                'utf-16-be',  # Big-endian UTF-16
-                'utf-32',     # Full Unicode
-                'latin-1',    # Western European
-                'iso-8859-1', # ISO Western European
-                'cp1252',     # Windows Western European
-                'cp1251',     # Windows Cyrillic
-                'gb2312',     # Simplified Chinese
-                'shift_jis',  # Japanese
-                'euc-kr',     # Korean
-                'big5',       # Traditional Chinese
-                'ascii'       # Fallback
-            ]
+            # For complex CSVs, always try UTF-8 first
+            encoding_used = 'utf-8'
             
-            encoding_used = None
-            csvfile = None
-            sample = ""
+            # Read the entire file to handle complex parsing
+            print(f"Reading CSV file: {csv_path}")
+            with open(csv_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
             
-            # Try to detect encoding
-            for encoding in encodings:
-                try:
-                    with open(csv_path, 'r', encoding=encoding, errors='strict') as test_file:
-                        # Try to read the entire file to ensure encoding works
-                        sample = test_file.read(8192)  # Read more for better detection
-                        test_file.seek(0)
-                    # If we got here, encoding works
-                    csvfile = open(csv_path, 'r', encoding=encoding, errors='replace')
-                    encoding_used = encoding
-                    break
-                except (UnicodeDecodeError, UnicodeError, LookupError):
+            # Use csv.reader with specific settings for complex data
+            import io
+            csvfile = io.StringIO(content)
+            
+            # Configure CSV reader for complex data
+            # Set a larger field size limit for JSON data
+            csv.field_size_limit(sys.maxsize)
+            
+            # Use excel dialect which handles quotes better
+            reader = csv.reader(csvfile, dialect='excel', 
+                              quoting=csv.QUOTE_MINIMAL,
+                              escapechar='\\',
+                              doublequote=True)
+            
+            row_num = 0
+            error_count = 0
+            max_errors = 50  # Increased tolerance for errors
+            
+            for row in reader:
+                row_num += 1
+                
+                if row_num % 100 == 0:
+                    print(f"Processing row {row_num}...")
+                
+                # Skip completely empty rows
+                if not row or all(cell == '' for cell in row):
                     continue
-            
-            # Last resort: use chardet to detect encoding
-            if not csvfile:
-                try:
-                    import chardet
-                    with open(csv_path, 'rb') as rawfile:
-                        raw = rawfile.read(100000)  # Read up to 100KB for detection
-                        result = chardet.detect(raw)
-                        if result['encoding']:
-                            try:
-                                csvfile = open(csv_path, 'r', encoding=result['encoding'], errors='replace')
-                                encoding_used = result['encoding']
-                            except:
-                                pass
-                except ImportError:
-                    pass  # chardet not installed
-            
-            # Ultimate fallback: UTF-8 with error replacement
-            if not csvfile:
-                csvfile = open(csv_path, 'r', encoding='utf-8', errors='replace')
-                encoding_used = 'utf-8 (with replacements)'
-            
-            try:
-                # Detect delimiter
-                if sample:
-                    sniffer = csv.Sniffer()
+                
+                processed_row = []
+                
+                for cell_idx, cell in enumerate(row):
                     try:
-                        delimiter = sniffer.sniff(sample).delimiter
-                    except:
-                        # Try common delimiters
-                        for delim in [',', ';', '\t', '|']:
-                            if delim in sample:
-                                delimiter = delim
-                                break
-                        else:
-                            delimiter = ','
-                else:
-                    delimiter = ','
-                
-                reader = csv.reader(csvfile, delimiter=delimiter)
-                row_num = 0
-                
-                for row in reader:
-                    row_num += 1
-                    processed_row = []
-                    
-                    for cell in row:
                         if cell == '' or cell is None:
                             processed_row.append(None)
                         else:
                             # Clean the cell value
-                            cell = cell.replace('\x00', '')  # Remove null bytes
+                            cell_str = str(cell)
                             
-                            # Smart type detection (but preserve strings with special chars)
-                            # Check if it looks like a pure number
-                            if cell.strip():  # Not empty after stripping
-                                # Don't convert if it has special Unicode characters
-                                if all(ord(char) < 128 for char in cell):
-                                    # Only try conversion for ASCII-only strings
-                                    try:
-                                        # Avoid converting IDs, phone numbers, zip codes
-                                        if (cell[0] != '0' and  # Doesn't start with 0
-                                            '.' in cell and 
-                                            len(cell) < 20 and 
-                                            cell.count('.') == 1):
-                                            # Might be a float
-                                            val = float(cell)
-                                            processed_row.append(val)
-                                        elif (cell.isdigit() and 
-                                              len(cell) < 10 and 
-                                              cell[0] != '0'):  # Doesn't start with 0
-                                            # Small integer (not phone/ID)
-                                            processed_row.append(int(cell))
-                                        else:
-                                            # Keep as string
-                                            processed_row.append(cell)
-                                    except (ValueError, AttributeError):
-                                        processed_row.append(cell)
-                                else:
-                                    # Has Unicode characters - keep as string
-                                    processed_row.append(cell)
-                            else:
-                                processed_row.append(cell.strip() if cell.strip() else None)
-                    
-                    try:
-                        sheet.append(processed_row)
-                    except IllegalCharacterError:
-                        # Handle illegal characters for Excel
-                        cleaned_row = []
-                        for cell in processed_row:
-                            if isinstance(cell, str):
-                                # Remove illegal XML characters
-                                illegal_chars = [chr(i) for i in range(0, 32) if i not in [9, 10, 13]]
-                                for char in illegal_chars:
-                                    cell = cell.replace(char, '')
-                                cleaned_row.append(cell)
-                            else:
-                                cleaned_row.append(cell)
-                        sheet.append(cleaned_row)
+                            # Remove null bytes and other problematic characters
+                            cell_str = cell_str.replace('\x00', '')
+                            
+                            # Remove other control characters except tab, newline, carriage return
+                            cleaned = ''.join(char for char in cell_str 
+                                            if ord(char) >= 32 or char in '\t\n\r')
+                            
+                            # Truncate extremely long cells (Excel has a 32,767 character limit)
+                            if len(cleaned) > 32767:
+                                cleaned = cleaned[:32764] + '...'
+                                print(f"Warning: Truncated long cell at row {row_num}, column {cell_idx + 1}")
+                            
+                            processed_row.append(cleaned)
                     except Exception as e:
-                        # Last resort: convert everything to strings
-                        string_row = [str(cell) if cell is not None else None for cell in row]
-                        sheet.append(string_row)
-                        print(f"Warning: Row {row_num} required special handling")
+                        print(f"Error processing cell at row {row_num}, column {cell_idx + 1}: {e}")
+                        processed_row.append('')  # Add empty string on error
                 
-            finally:
-                csvfile.close()
+                try:
+                    sheet.append(processed_row)
+                except Exception as e:
+                    error_count += 1
+                    print(f"Error at row {row_num}: {str(e)[:100]}")
+                    
+                    # Try again with all strings
+                    try:
+                        safe_row = []
+                        for cell in processed_row:
+                            if cell is None:
+                                safe_row.append('')
+                            else:
+                                # Extra safety - remove ALL control characters
+                                safe_cell = ''.join(char for char in str(cell) 
+                                                  if ord(char) >= 32 or char in '\t\n\r')
+                                safe_row.append(safe_cell[:32767])  # Ensure within Excel limits
+                        sheet.append(safe_row)
+                        print(f"Row {row_num} saved with extra cleaning")
+                    except Exception as e2:
+                        print(f"Row {row_num} failed completely: {str(e2)[:100]}")
+                        if error_count > max_errors:
+                            # Try to save what we have so far
+                            print(f"Too many errors ({error_count}). Saving partial file...")
+                            break
+                        # Skip this row and continue
+                        continue
+            
+            print(f"Processed {row_num} rows total with {error_count} errors")
             
             # Save the workbook
+            print("Saving Excel file...")
             workbook.save(str(excel_path))
             workbook.close()
             
-            if encoding_used not in ['utf-8', 'utf-8-sig']:
-                return True, f"Successfully converted to: {excel_path}\n(Detected encoding: {encoding_used})"
+            if error_count > 0:
+                return True, f"Successfully converted to: {excel_path}\n(Processed {row_num} rows with {error_count} errors - some data may have been cleaned or skipped)"
             else:
-                return True, f"Successfully converted to: {excel_path}"
+                return True, f"Successfully converted to: {excel_path}\n(Processed {row_num} rows successfully)"
             
         except Exception as e:
-            return False, f"Error converting CSV to Excel: {str(e)}"
+            error_msg = f"Error converting CSV to Excel: {str(e)}"
+            print(f"Full error: {error_msg}")
+            return False, error_msg
     
     def get_excel_info(self, excel_path):
         """Get information about Excel file (sheet names, dimensions, etc.)"""
