@@ -1,9 +1,11 @@
-name: Build Apps
+name: Build and Release
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # Allows manual trigger from GitHub website
+    tags:
+      - 'v*'  # Triggers on version tags like v1.0.1
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -18,7 +20,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install pyinstaller openpyxl xlrd
+        pip install pyinstaller openpyxl xlrd chardet
     
     - name: Build Windows exe
       run: |
@@ -42,14 +44,64 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install pyinstaller openpyxl xlrd
+        pip install pyinstaller openpyxl xlrd chardet
     
     - name: Build macOS app
       run: |
         pyinstaller --onefile --windowed --name "ExcelCSVConverter" --icon=spreadsheet.icns excel_csv_converter.py
+        
+    - name: Create macOS ZIP
+      run: |
+        cd dist
+        zip -r ../ExcelCSVConverter-macOS.zip ExcelCSVConverter.app
+        cd ..
     
     - name: Upload macOS build
       uses: actions/upload-artifact@v4
       with:
         name: macOS-Build
-        path: dist/*
+        path: ExcelCSVConverter-macOS.zip
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')  # Only run on tags
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: Windows-Build
+        path: ./artifacts/windows/
+    
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: macOS-Build
+        path: ./artifacts/macos/
+    
+    - name: Rename files for release
+      run: |
+        mv ./artifacts/windows/*.exe ./ExcelCSVConverter-Windows.exe
+        mv ./artifacts/macos/*.zip ./ExcelCSVConverter-macOS.zip
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ExcelCSVConverter-Windows.exe
+          ExcelCSVConverter-macOS.zip
+        generate_release_notes: true
+        body: |
+          ## Excel CSV Converter
+          
+          ### Installation
+          - **Windows**: Download `ExcelCSVConverter-Windows.exe` and run
+          - **macOS**: Download `ExcelCSVConverter-macOS.zip`, unzip, and follow the [installation guide](https://github.com/robjsim/excel-csv-converter#installation-instructions)
+          
+          ### What's New
+          See the auto-generated release notes below for changes since the last release.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
